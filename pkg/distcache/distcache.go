@@ -29,9 +29,7 @@ type DistCache struct {
 	nodes          []string
 	logger         *log.Logger
 	stopCleanup    chan struct{} // Channel to signal stopping of cleanup routine
-	mu             sync.RWMutex
-	isDown         bool
-	nodesStatus    sync.Map
+	nodesStatus    sync.Map      // for testing - to store the status of nodes
 }
 
 type Config struct {
@@ -112,25 +110,14 @@ func (dc *DistCache) Stop() {
 }
 
 func (dc *DistCache) SimulateDown(nodeID string) {
-	//dc.mu.Lock()
-	//defer dc.mu.Unlock()
-	//dc.isDown = true
-
 	dc.nodesStatus.Store(nodeID, false)
 }
 
 func (dc *DistCache) SimulateUp(nodeID string) {
-	//dc.mu.Lock()
-	//defer dc.mu.Unlock()
-	//dc.isDown = false
-
 	dc.nodesStatus.Store(nodeID, true)
 }
 
 func (dc *DistCache) IsDown(nodeID string) bool {
-	//dc.mu.RLock()
-	//defer dc.mu.RUnlock()
-	//return dc.isDown
 	val, _ := dc.nodesStatus.Load(nodeID)
 	return !val.(bool)
 }
@@ -140,10 +127,12 @@ func (dc *DistCache) getReplicaNodes(key string) []string {
 }
 
 func (dc *DistCache) Set(key string, value interface{}, duration time.Duration) error {
-	//if dc.IsDown(dc.nodeID) {
-	//	return errors.New("node is down")
-	//}
+	if dc.IsDown(dc.nodeID) {
+		dc.logger.Printf("%s - Node is down", dc.nodeID)
+		return errors.New("node is down")
+	}
 	if key == "" {
+		dc.logger.Printf("Key cannot be empty")
 		return fmt.Errorf("key cannot be empty")
 	}
 	primaryNode := dc.consistentHash.Get(key)
@@ -171,16 +160,12 @@ func (dc *DistCache) Set(key string, value interface{}, duration time.Duration) 
 }
 
 func (dc *DistCache) Get(key string) (interface{}, bool, error) {
-	//if dc.IsDown(dc.nodeID) {
-	//	return nil, false, errors.New("node is down")
-	//}
+	if dc.IsDown(dc.nodeID) {
+		dc.logger.Printf("%s - Node is down", dc.nodeID)
+		return nil, false, errors.New("node is down")
+	}
 	primaryNode := dc.consistentHash.Get(key)
 	dc.logger.Printf("Getting key %s from primary node %s", key, primaryNode)
-
-	// Try local cache first
-	// if value, found := dc.cache.Get(key); found {
-	//     return value, true, nil
-	// }
 
 	// Try primary node and replica nodes
 	nodes := append([]string{primaryNode}, dc.getReplicaNodes(key)...)
@@ -217,13 +202,15 @@ func (dc *DistCache) Get(key string) (interface{}, bool, error) {
 		}
 	}
 
+	dc.logger.Printf("Key %s not found on any available node", key)
 	return nil, false, errors.New("key not found on any available node")
 }
 
 func (dc *DistCache) Delete(key string) error {
-	//if dc.IsDown(dc.nodeID) {
-	//	return errors.New("node is down")
-	//}
+	if dc.IsDown(dc.nodeID) {
+		dc.logger.Printf("%s - Node is down", dc.nodeID)
+		return errors.New("node is down")
+	}
 	primaryNode := dc.consistentHash.Get(key)
 	dc.logger.Printf("Deleting key %s from primary node %s", key, primaryNode)
 	if primaryNode == dc.nodeID {
@@ -258,6 +245,7 @@ func (dc *DistCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (dc *DistCache) handleSet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		dc.logger.Printf("handleSet, Method not allowed")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -269,6 +257,7 @@ func (dc *DistCache) handleSet(w http.ResponseWriter, r *http.Request) {
 		Replicate bool        `json:"replicate"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		dc.logger.Printf("handleSet, Error: %v", err.Error())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -277,6 +266,7 @@ func (dc *DistCache) handleSet(w http.ResponseWriter, r *http.Request) {
 	if data.Replicate {
 		err := dc.replicator.ReplicateSet(data.Key, data.Value, time.Duration(data.Duration)*time.Second)
 		if err != nil {
+			dc.logger.Printf("handleSet, Error: %v", err.Error())
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -286,18 +276,21 @@ func (dc *DistCache) handleSet(w http.ResponseWriter, r *http.Request) {
 
 func (dc *DistCache) handleGet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
+		dc.logger.Printf("handleGet, Method not allowed")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	key := r.URL.Query().Get("key")
 	if key == "" {
+		dc.logger.Printf("handleGet, Error: key is required")
 		http.Error(w, "Key is required", http.StatusBadRequest)
 		return
 	}
 
 	value, found := dc.cache.Get(key)
 	if !found {
+		dc.logger.Printf("handleGet, Error: key not found")
 		http.Error(w, "Key not found", http.StatusNotFound)
 		return
 	}
